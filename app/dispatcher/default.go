@@ -285,9 +285,17 @@ func (d *DefaultDispatcher) Dispatch(ctx context.Context, destination net.Destin
 	sniffingRequest := content.SniffingRequest
 	inbound, outbound := d.getLink(ctx)
 	if !sniffingRequest.Enabled {
-		go d.routedDispatch(ctx, outbound, destination)
+		ctx, cancel := context.WithCancel(ctx)
+		setTrackedRoute, finishTrackedConnection := TrackLink(ctx, cancel, destination, outbound)
+		go func() {
+			defer finishTrackedConnection()
+			defer cancel()
+			d.routedDispatch(ctx, outbound, destination, setTrackedRoute)
+		}()
 	} else {
 		go func() {
+			ctx, cancel := context.WithCancel(ctx)
+			defer cancel()
 			cReader := &cachedReader{
 				reader: outbound.Reader.(*pipe.Reader),
 			}
@@ -314,7 +322,9 @@ func (d *DefaultDispatcher) Dispatch(ctx context.Context, destination net.Destin
 					ob.Target = destination
 				}
 			}
-			d.routedDispatch(ctx, outbound, destination)
+			setTrackedRoute, finishTrackedConnection := TrackLink(ctx, cancel, destination, outbound)
+			defer finishTrackedConnection()
+			d.routedDispatch(ctx, outbound, destination, setTrackedRoute)
 		}()
 	}
 	return inbound, nil
@@ -338,11 +348,16 @@ func (d *DefaultDispatcher) DispatchLink(ctx context.Context, destination net.De
 		content = new(session.Content)
 		ctx = session.ContextWithContent(ctx, content)
 	}
-	outbound = WrapLink(ctx, d.policy, d.stats, outbound)
 	sniffingRequest := content.SniffingRequest
 	if !sniffingRequest.Enabled {
-		d.routedDispatch(ctx, outbound, destination)
+		ctx, cancel := context.WithCancel(ctx)
+		setTrackedRoute, finishTrackedConnection := TrackLink(ctx, cancel, destination, outbound)
+		defer finishTrackedConnection()
+		defer cancel()
+		outbound = WrapLink(ctx, d.policy, d.stats, outbound)
+		d.routedDispatch(ctx, outbound, destination, setTrackedRoute)
 	} else {
+		outbound = WrapLink(ctx, d.policy, d.stats, outbound)
 		cReader := &cachedReader{
 			reader: outbound.Reader.(buf.TimeoutReader),
 		}
@@ -369,7 +384,11 @@ func (d *DefaultDispatcher) DispatchLink(ctx context.Context, destination net.De
 				ob.Target = destination
 			}
 		}
-		d.routedDispatch(ctx, outbound, destination)
+		ctx, cancel := context.WithCancel(ctx)
+		setTrackedRoute, finishTrackedConnection := TrackLink(ctx, cancel, destination, outbound)
+		defer finishTrackedConnection()
+		defer cancel()
+		d.routedDispatch(ctx, outbound, destination, setTrackedRoute)
 	}
 
 	return nil
@@ -431,11 +450,13 @@ func sniffer(ctx context.Context, cReader *cachedReader, metadataOnly bool, netw
 	return contentResult, contentErr
 }
 
-func (d *DefaultDispatcher) routedDispatch(ctx context.Context, link *transport.Link, destination net.Destination) {
+func (d *DefaultDispatcher) routedDispatch(ctx context.Context, link *transport.Link, destination net.Destination, setTrackedRoute func(string, []string, string)) {
 	outbounds := session.OutboundsFromContext(ctx)
 	ob := outbounds[len(outbounds)-1]
 
 	var handler outbound.Handler
+	var outboundGroupTags []string
+	var ruleTag string
 
 	routingLink := routing_session.AsRoutingContext(ctx)
 	inTag := routingLink.GetInboundTag()
@@ -455,12 +476,14 @@ func (d *DefaultDispatcher) routedDispatch(ctx context.Context, link *transport.
 	} else if d.router != nil {
 		if route, err := d.router.PickRoute(routingLink); err == nil {
 			outTag := route.GetOutboundTag()
+			outboundGroupTags = route.GetOutboundGroupTags()
+			ruleTag = route.GetRuleTag()
 			if h := d.ohm.GetHandler(outTag); h != nil {
 				isPickRoute = 2
-				if route.GetRuleTag() == "" {
+				if ruleTag == "" {
 					errors.LogInfo(ctx, "taking detour [", outTag, "] for [", destination, "]")
 				} else {
-					errors.LogInfo(ctx, "Hit route rule: [", route.GetRuleTag(), "] so taking detour [", outTag, "] for [", destination, "]")
+					errors.LogInfo(ctx, "Hit route rule: [", ruleTag, "] so taking detour [", outTag, "] for [", destination, "]")
 				}
 				handler = h
 			} else {
@@ -486,6 +509,9 @@ func (d *DefaultDispatcher) routedDispatch(ctx context.Context, link *transport.
 	}
 
 	ob.Tag = handler.Tag()
+	if setTrackedRoute != nil {
+		setTrackedRoute(handler.Tag(), outboundGroupTags, ruleTag)
+	}
 	if accessMessage := log.AccessMessageFromContext(ctx); accessMessage != nil {
 		if tag := handler.Tag(); tag != "" {
 			if inTag == "" {
