@@ -168,6 +168,10 @@ func (s *DoHNameServer) sendQuery(ctx context.Context, noResponseErrCh chan<- er
 				Protocol:       "https",
 				SkipDNSResolve: true,
 			})
+			inboundTag := "-"
+			if inbound := session.InboundFromContext(dnsCtx); inbound != nil && inbound.Tag != "" {
+				inboundTag = inbound.Tag
+			}
 
 			// forced to use mux for DOH
 			// dnsCtx = session.ContextWithMuxPreferred(dnsCtx, true)
@@ -179,14 +183,42 @@ func (s *DoHNameServer) sendQuery(ctx context.Context, noResponseErrCh chan<- er
 			b, err := dns.PackMessage(r.msg)
 			if err != nil {
 				errors.LogErrorInner(ctx, err, "failed to pack dns query for ", fqdn)
+				emitAppDNSDiagnostic(
+					"doh pack failed server=%s id=%d type=%v domain=%s inboundTag=%s err=%v",
+					s.Name(),
+					r.msg.ID,
+					r.reqType,
+					r.domain,
+					inboundTag,
+					err,
+				)
 				if noResponseErrCh != nil {
 					noResponseErrCh <- err
 				}
 				return
 			}
+			emitAppDNSDiagnostic(
+				"doh send server=%s id=%d type=%v domain=%s url=%s inboundTag=%s",
+				s.Name(),
+				r.msg.ID,
+				r.reqType,
+				r.domain,
+				s.dohURL,
+				inboundTag,
+			)
 			resp, err := s.dohHTTPSContext(dnsCtx, b.Bytes())
 			if err != nil {
 				errors.LogErrorInner(ctx, err, "failed to retrieve response for ", fqdn)
+				emitAppDNSDiagnostic(
+					"doh request failed server=%s id=%d type=%v domain=%s url=%s inboundTag=%s err=%v",
+					s.Name(),
+					r.msg.ID,
+					r.reqType,
+					r.domain,
+					s.dohURL,
+					inboundTag,
+					err,
+				)
 				if noResponseErrCh != nil {
 					noResponseErrCh <- err
 				}
@@ -195,11 +227,30 @@ func (s *DoHNameServer) sendQuery(ctx context.Context, noResponseErrCh chan<- er
 			rec, err := parseResponse(resp)
 			if err != nil {
 				errors.LogErrorInner(ctx, err, "failed to handle DOH response for ", fqdn)
+				emitAppDNSDiagnostic(
+					"doh parse failed server=%s id=%d type=%v domain=%s url=%s err=%v",
+					s.Name(),
+					r.msg.ID,
+					r.reqType,
+					r.domain,
+					s.dohURL,
+					err,
+				)
 				if noResponseErrCh != nil {
 					noResponseErrCh <- err
 				}
 				return
 			}
+			emitAppDNSDiagnostic(
+				"doh response server=%s id=%d type=%v domain=%s ips=%d rcode=%v rttMs=%d",
+				s.Name(),
+				r.msg.ID,
+				r.reqType,
+				r.domain,
+				len(rec.IP),
+				rec.RCode,
+				time.Since(r.start).Milliseconds(),
+			)
 			s.cacheController.updateRecord(r, rec)
 		}(req)
 	}

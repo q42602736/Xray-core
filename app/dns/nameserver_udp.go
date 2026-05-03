@@ -12,12 +12,15 @@ import (
 	"github.com/xtls/xray-core/common/net"
 	"github.com/xtls/xray-core/common/protocol/dns"
 	udp_proto "github.com/xtls/xray-core/common/protocol/udp"
+	"github.com/xtls/xray-core/common/session"
 	"github.com/xtls/xray-core/common/task"
 	dns_feature "github.com/xtls/xray-core/features/dns"
 	"github.com/xtls/xray-core/features/routing"
 	"github.com/xtls/xray-core/transport/internet/udp"
 	"golang.org/x/net/dns/dnsmessage"
 )
+
+const udpDNSRequestTimeout = 8 * time.Second
 
 // ClassicNameServer implemented traditional UDP DNS.
 type ClassicNameServer struct {
@@ -29,6 +32,7 @@ type ClassicNameServer struct {
 	requestsCleanup *task.Periodic
 	reqID           uint32
 	clientIP        net.IP
+	pendingCount    atomic.Uint32
 }
 
 type udpDnsRequest struct {
@@ -81,7 +85,17 @@ func (s *ClassicNameServer) RequestsCleanup() error {
 
 	for id, req := range s.requests {
 		if req.expire.Before(now) {
+			emitAppDNSDiagnostic(
+				"udp timeout server=%s id=%d type=%v domain=%s pending=%d ageMs=%d",
+				s.Name(),
+				id,
+				req.reqType,
+				req.domain,
+				len(s.requests),
+				now.Sub(req.start).Milliseconds(),
+			)
 			delete(s.requests, id)
+			s.pendingCount.Add(^uint32(0))
 		}
 	}
 
@@ -99,6 +113,7 @@ func (s *ClassicNameServer) HandleResponse(ctx context.Context, packet *udp_prot
 	payload.Release()
 	if err != nil {
 		errors.LogErrorInner(ctx, err, s.Name(), " fail to parse responded DNS udp")
+		emitAppDNSDiagnostic("udp response parse failed server=%s err=%v", s.Name(), err)
 		return
 	}
 
@@ -108,12 +123,30 @@ func (s *ClassicNameServer) HandleResponse(ctx context.Context, packet *udp_prot
 	if ok {
 		// remove the pending request
 		delete(s.requests, id)
+		s.pendingCount.Add(^uint32(0))
 	}
 	s.Unlock()
 	if !ok {
 		errors.LogErrorInner(ctx, err, s.Name(), " cannot find the pending request")
+		emitAppDNSDiagnostic(
+			"udp response missing pending server=%s id=%d ips=%d rcode=%v",
+			s.Name(),
+			id,
+			len(ipRec.IP),
+			ipRec.RCode,
+		)
 		return
 	}
+	emitAppDNSDiagnostic(
+		"udp response server=%s id=%d type=%v domain=%s ips=%d rcode=%v rttMs=%d",
+		s.Name(),
+		id,
+		req.reqType,
+		req.domain,
+		len(ipRec.IP),
+		ipRec.RCode,
+		time.Since(req.start).Milliseconds(),
+	)
 
 	// if truncated, retry with EDNS0 option(udp payload size: 1350)
 	if ipRec.RawHeader.Truncated {
@@ -133,6 +166,15 @@ func (s *ClassicNameServer) HandleResponse(ctx context.Context, packet *udp_prot
 			b, _ := dns.PackMessage(newReq.msg)
 			copyDest := net.UDPDestination(s.address.Address, s.address.Port)
 			b.UDP = &copyDest
+			emitAppDNSDiagnostic(
+				"udp retry truncated server=%s id=%d type=%v domain=%s dest=%s pending=%d",
+				s.Name(),
+				newReq.msg.ID,
+				newReq.reqType,
+				newReq.domain,
+				s.address.String(),
+				s.pendingCount.Load(),
+			)
 			s.udpServer.Dispatch(toDnsContext(newReq.ctx, s.address.String()), *s.address, b)
 			return
 		}
@@ -148,9 +190,10 @@ func (s *ClassicNameServer) newReqID() uint16 {
 func (s *ClassicNameServer) addPendingRequest(req *udpDnsRequest) {
 	s.Lock()
 	id := req.msg.ID
-	req.expire = time.Now().Add(time.Second * 8)
+	req.expire = time.Now().Add(udpDNSRequestTimeout)
 	s.requests[id] = req
 	s.Unlock()
+	s.pendingCount.Add(1)
 	common.Must(s.requestsCleanup.Start())
 }
 
@@ -181,6 +224,20 @@ func (s *ClassicNameServer) sendQuery(ctx context.Context, noResponseErrCh chan<
 		}
 		copyDest := net.UDPDestination(s.address.Address, s.address.Port)
 		b.UDP = &copyDest
+		inboundTag := "-"
+		if inbound := session.InboundFromContext(ctx); inbound != nil && strings.TrimSpace(inbound.Tag) != "" {
+			inboundTag = inbound.Tag
+		}
+		emitAppDNSDiagnostic(
+			"udp send server=%s id=%d type=%v domain=%s dest=%s inboundTag=%s pending=%d",
+			s.Name(),
+			req.msg.ID,
+			req.reqType,
+			req.domain,
+			s.address.String(),
+			inboundTag,
+			s.pendingCount.Load(),
+		)
 		s.udpServer.Dispatch(toDnsContext(ctx, s.address.String()), *s.address, b)
 	}
 }

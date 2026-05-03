@@ -18,6 +18,14 @@ type InterfaceUpdater struct {
 
 var updater *InterfaceUpdater
 
+var DiagnosticLogger func(format string, args ...any)
+
+func emitDiagnostic(format string, args ...any) {
+	if DiagnosticLogger != nil {
+		DiagnosticLogger(format, args...)
+	}
+}
+
 func (updater *InterfaceUpdater) Get() *net.Interface {
 	updater.Lock()
 	defer updater.Unlock()
@@ -70,9 +78,11 @@ func (updater *InterfaceUpdater) Update() {
 
 	if got == nil {
 		errors.LogInfo(context.Background(), "[tun] failed to update interface > got == nil")
+		emitDiagnostic("xray tun outbound interface empty fixed=%s tunIndex=%d", updater.fixedName, updater.tunIndex)
 		return
 	}
 
 	updater.iface = got
 	errors.LogInfo(context.Background(), "[tun] update interface ", got.Name, " ", got.Index)
+	emitDiagnostic("xray tun outbound interface selected name=%s index=%d fixed=%s", got.Name, got.Index, updater.fixedName)
 }

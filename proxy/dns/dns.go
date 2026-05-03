@@ -6,6 +6,7 @@ import (
 	"io"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/xtls/xray-core/common"
@@ -25,6 +26,23 @@ import (
 	"github.com/xtls/xray-core/transport/internet/stat"
 	"golang.org/x/net/dns/dnsmessage"
 )
+
+var DiagnosticLogger func(format string, args ...any)
+
+var dnsDiagnosticCount atomic.Uint32
+
+func emitDiagnostic(format string, args ...any) {
+	if DiagnosticLogger != nil {
+		DiagnosticLogger(format, args...)
+	}
+}
+
+func emitDNSDiagnostic(format string, args ...any) {
+	count := dnsDiagnosticCount.Add(1)
+	if count <= 40 || count%100 == 0 {
+		emitDiagnostic("xray dns "+format, args...)
+	}
+}
 
 func init() {
 	common.Must(common.RegisterConfig((*Config)(nil), func(ctx context.Context, config interface{}) (interface{}, error) {
@@ -250,7 +268,17 @@ func (h *Handler) Process(ctx context.Context, link *transport.Link, d internet.
 				continue
 			}
 
-			switch h.applyRules(qType, domain) {
+			action := h.applyRules(qType, domain)
+			emitDNSDiagnostic(
+				"query network=%s dest=%s type=%v domain=%s action=%v",
+				srcNetwork.String(),
+				dest.String(),
+				qType,
+				domain,
+				action,
+			)
+
+			switch action {
 			case RuleAction_Drop:
 				b.Release()
 				errors.LogInfo(ctx, "blocked type ", qType, " query for domain ", domain)
@@ -331,6 +359,12 @@ func (h *Handler) handleIPQuery(id uint16, qType dnsmessage.Type, domain string,
 
 	rcode := dns.RCodeFromError(err)
 	if rcode == 0 && len(ips) == 0 && !go_errors.Is(err, dns.ErrEmptyResponse) {
+		emitDNSDiagnostic(
+			"answer skipped type=%v domain=%s err=%v",
+			qType,
+			domain,
+			err,
+		)
 		errors.LogInfoInner(context.Background(), err, "ip query")
 		return
 	}
@@ -378,6 +412,14 @@ func (h *Handler) handleIPQuery(id uint16, qType dnsmessage.Type, domain string,
 			common.Must(builder.AAAAResource(rHeader6, r))
 		}
 	}
+	emitDNSDiagnostic(
+		"answer type=%v domain=%s rcode=%d ips=%d err=%v",
+		qType,
+		domain,
+		rcode,
+		len(ips),
+		err,
+	)
 	msgBytes, err := builder.Finish()
 	if err != nil {
 		errors.LogInfoInner(context.Background(), err, "pack message")

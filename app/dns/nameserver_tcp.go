@@ -134,6 +134,10 @@ func (s *TCPNameServer) sendQuery(ctx context.Context, noResponseErrCh chan<- er
 				Protocol:       "dns",
 				SkipDNSResolve: true,
 			})
+			inboundTag := "-"
+			if inbound := session.InboundFromContext(dnsCtx); inbound != nil && inbound.Tag != "" {
+				inboundTag = inbound.Tag
+			}
 
 			var cancel context.CancelFunc
 			dnsCtx, cancel = context.WithDeadline(dnsCtx, deadline)
@@ -142,15 +146,43 @@ func (s *TCPNameServer) sendQuery(ctx context.Context, noResponseErrCh chan<- er
 			b, err := dns.PackMessage(r.msg)
 			if err != nil {
 				errors.LogErrorInner(ctx, err, "failed to pack dns query")
+				emitAppDNSDiagnostic(
+					"tcp pack failed server=%s id=%d type=%v domain=%s inboundTag=%s err=%v",
+					s.Name(),
+					r.msg.ID,
+					r.reqType,
+					r.domain,
+					inboundTag,
+					err,
+				)
 				if noResponseErrCh != nil {
 					noResponseErrCh <- err
 				}
 				return
 			}
 
+			emitAppDNSDiagnostic(
+				"tcp send server=%s id=%d type=%v domain=%s dest=%s inboundTag=%s",
+				s.Name(),
+				r.msg.ID,
+				r.reqType,
+				r.domain,
+				s.destination.String(),
+				inboundTag,
+			)
 			conn, err := s.dial(dnsCtx)
 			if err != nil {
 				errors.LogErrorInner(ctx, err, "failed to dial namesever")
+				emitAppDNSDiagnostic(
+					"tcp dial failed server=%s id=%d type=%v domain=%s dest=%s inboundTag=%s err=%v",
+					s.Name(),
+					r.msg.ID,
+					r.reqType,
+					r.domain,
+					s.destination.String(),
+					inboundTag,
+					err,
+				)
 				if noResponseErrCh != nil {
 					noResponseErrCh <- err
 				}
@@ -179,6 +211,14 @@ func (s *TCPNameServer) sendQuery(ctx context.Context, noResponseErrCh chan<- er
 			_, err = conn.Write(dnsReqBuf.Bytes())
 			if err != nil {
 				errors.LogErrorInner(ctx, err, "failed to send query")
+				emitAppDNSDiagnostic(
+					"tcp write failed server=%s id=%d type=%v domain=%s err=%v",
+					s.Name(),
+					r.msg.ID,
+					r.reqType,
+					r.domain,
+					err,
+				)
 				if noResponseErrCh != nil {
 					noResponseErrCh <- err
 				}
@@ -191,6 +231,14 @@ func (s *TCPNameServer) sendQuery(ctx context.Context, noResponseErrCh chan<- er
 			n, err := respBuf.ReadFullFrom(conn, 2)
 			if err != nil && n == 0 {
 				errors.LogErrorInner(ctx, err, "failed to read response length")
+				emitAppDNSDiagnostic(
+					"tcp read length failed server=%s id=%d type=%v domain=%s err=%v",
+					s.Name(),
+					r.msg.ID,
+					r.reqType,
+					r.domain,
+					err,
+				)
 				if noResponseErrCh != nil {
 					noResponseErrCh <- err
 				}
@@ -200,6 +248,14 @@ func (s *TCPNameServer) sendQuery(ctx context.Context, noResponseErrCh chan<- er
 			err = binary.Read(bytes.NewReader(respBuf.Bytes()), binary.BigEndian, &length)
 			if err != nil {
 				errors.LogErrorInner(ctx, err, "failed to parse response length")
+				emitAppDNSDiagnostic(
+					"tcp parse length failed server=%s id=%d type=%v domain=%s err=%v",
+					s.Name(),
+					r.msg.ID,
+					r.reqType,
+					r.domain,
+					err,
+				)
 				if noResponseErrCh != nil {
 					noResponseErrCh <- err
 				}
@@ -209,6 +265,15 @@ func (s *TCPNameServer) sendQuery(ctx context.Context, noResponseErrCh chan<- er
 			n, err = respBuf.ReadFullFrom(conn, int32(length))
 			if err != nil && n == 0 {
 				errors.LogErrorInner(ctx, err, "failed to read response length")
+				emitAppDNSDiagnostic(
+					"tcp read body failed server=%s id=%d type=%v domain=%s len=%d err=%v",
+					s.Name(),
+					r.msg.ID,
+					r.reqType,
+					r.domain,
+					length,
+					err,
+				)
 				if noResponseErrCh != nil {
 					noResponseErrCh <- err
 				}
@@ -218,12 +283,30 @@ func (s *TCPNameServer) sendQuery(ctx context.Context, noResponseErrCh chan<- er
 			rec, err := parseResponse(respBuf.Bytes())
 			if err != nil {
 				errors.LogErrorInner(ctx, err, "failed to parse DNS over TCP response")
+				emitAppDNSDiagnostic(
+					"tcp parse response failed server=%s id=%d type=%v domain=%s err=%v",
+					s.Name(),
+					r.msg.ID,
+					r.reqType,
+					r.domain,
+					err,
+				)
 				if noResponseErrCh != nil {
 					noResponseErrCh <- err
 				}
 				return
 			}
 
+			emitAppDNSDiagnostic(
+				"tcp response server=%s id=%d type=%v domain=%s ips=%d rcode=%v rttMs=%d",
+				s.Name(),
+				r.msg.ID,
+				r.reqType,
+				r.domain,
+				len(rec.IP),
+				rec.RCode,
+				time.Since(r.start).Milliseconds(),
+			)
 			s.cacheController.updateRecord(r, rec)
 		}(req)
 	}
