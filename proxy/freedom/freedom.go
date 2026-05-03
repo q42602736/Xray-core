@@ -31,6 +31,8 @@ import (
 )
 
 var useSplice bool
+var DirectRouteProtector func(ctx context.Context, inboundTag string, outboundTag string, destination net.Destination) error
+
 var allNetworks [8]bool
 var defaultBlockPrivateRule *FinalRule
 var defaultBlockAllRule *FinalRule
@@ -243,6 +245,10 @@ func (h *Handler) Process(ctx context.Context, link *transport.Link, dialer inte
 	ob.CanSpliceCopy = 1
 	inbound := session.InboundFromContext(ctx)
 	defaultRule := getDefaultFinalRule(inbound)
+	inboundTag := ""
+	if inbound != nil {
+		inboundTag = inbound.Tag
+	}
 
 	destination := ob.Target
 	origTargetAddr := ob.OriginalTarget.Address
@@ -306,6 +312,11 @@ func (h *Handler) Process(ctx context.Context, link *transport.Link, dialer inte
 			return nil
 		}
 
+		if DirectRouteProtector != nil {
+			if err := DirectRouteProtector(ctx, inboundTag, ob.Tag, dialDest); err != nil {
+				return err
+			}
+		}
 		rawConn, err := dialer.Dial(ctx, dialDest)
 		if err != nil {
 			return err
