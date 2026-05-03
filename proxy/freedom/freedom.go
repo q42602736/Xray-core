@@ -32,6 +32,8 @@ import (
 
 var useSplice bool
 
+var DirectRouteProtector func(ctx context.Context, inboundTag string, outboundTag string, destination net.Destination) error
+
 var defaultPrivateBlockIP = []string{
 	"0.0.0.0/8",
 	"10.0.0.0/8",
@@ -148,6 +150,10 @@ func (h *Handler) Process(ctx context.Context, link *transport.Link, dialer inte
 	ob.CanSpliceCopy = 1
 	inbound := session.InboundFromContext(ctx)
 	blockedIPMatcher := h.getBlockedIPMatcher(ctx, inbound)
+	inboundTag := ""
+	if inbound != nil {
+		inboundTag = inbound.Tag
+	}
 
 	destination := ob.Target
 	origTargetAddr := ob.OriginalTarget.Address
@@ -196,6 +202,11 @@ func (h *Handler) Process(ctx context.Context, link *transport.Link, dialer inte
 			}
 		}
 
+		if DirectRouteProtector != nil {
+			if err := DirectRouteProtector(ctx, inboundTag, ob.Tag, dialDest); err != nil {
+				return err
+			}
+		}
 		rawConn, err := dialer.Dial(ctx, dialDest)
 		if err != nil {
 			return err
