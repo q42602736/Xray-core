@@ -4,7 +4,6 @@ import (
 	"context"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/xtls/xray-core/common"
@@ -26,51 +25,6 @@ import (
 )
 
 var errSniffingTimeout = errors.New("timeout on sniffing")
-
-var DiagnosticLogger func(format string, args ...any)
-
-var routeDiagnosticCount atomic.Uint32
-
-func emitRouteDiagnostic(format string, args ...any) {
-	if DiagnosticLogger == nil {
-		return
-	}
-	count := routeDiagnosticCount.Add(1)
-	if count <= 80 || count%100 == 0 {
-		DiagnosticLogger(format, args...)
-	}
-}
-
-func shouldEmitRouteDiagnostic(inTag string, destination net.Destination, targetDomain string) bool {
-	if strings.Contains(inTag, "tun") {
-		return true
-	}
-	target := strings.ToLower(destination.String() + " " + targetDomain)
-	for _, keyword := range []string{"baidu", "bilibili", "hdslb", "qq.com", "163.com", "douyin"} {
-		if strings.Contains(target, keyword) {
-			return true
-		}
-	}
-	return false
-}
-
-func summarizeRouteIPs(ips []net.IP) string {
-	if len(ips) == 0 {
-		return "-"
-	}
-	limit := len(ips)
-	if limit > 6 {
-		limit = 6
-	}
-	values := make([]string, 0, limit+1)
-	for i := 0; i < limit; i++ {
-		values = append(values, ips[i].String())
-	}
-	if len(ips) > limit {
-		values = append(values, "...")
-	}
-	return strings.Join(values, "|")
-}
 
 type cachedReader struct {
 	sync.Mutex
@@ -507,12 +461,10 @@ func (d *DefaultDispatcher) routedDispatch(ctx context.Context, link *transport.
 	routingLink := routing_session.AsRoutingContext(ctx)
 	inTag := routingLink.GetInboundTag()
 	isPickRoute := 0
-	routeState := "default"
 	if forcedOutboundTag := session.GetForcedOutboundTagFromContext(ctx); forcedOutboundTag != "" {
 		ctx = session.SetForcedOutboundTagToContext(ctx, "")
 		if h := d.ohm.GetHandler(forcedOutboundTag); h != nil {
 			isPickRoute = 1
-			routeState = "forced"
 			errors.LogInfo(ctx, "taking platform initialized detour [", forcedOutboundTag, "] for [", destination, "]")
 			handler = h
 		} else {
@@ -528,7 +480,6 @@ func (d *DefaultDispatcher) routedDispatch(ctx context.Context, link *transport.
 			ruleTag = route.GetRuleTag()
 			if h := d.ohm.GetHandler(outTag); h != nil {
 				isPickRoute = 2
-				routeState = "picked"
 				if ruleTag == "" {
 					errors.LogInfo(ctx, "taking detour [", outTag, "] for [", destination, "]")
 				} else {
@@ -542,7 +493,6 @@ func (d *DefaultDispatcher) routedDispatch(ctx context.Context, link *transport.
 				return // DO NOT CHANGE: the traffic shouldn't be processed by default outbound if the specified outbound tag doesn't exist (yet), e.g., VLESS Reverse Proxy
 			}
 		} else {
-			routeState = "router-error:" + err.Error()
 			errors.LogInfo(ctx, "default route for ", destination)
 		}
 	}
@@ -562,19 +512,6 @@ func (d *DefaultDispatcher) routedDispatch(ctx context.Context, link *transport.
 	if setTrackedRoute != nil {
 		setTrackedRoute(handler.Tag(), outboundGroupTags, ruleTag)
 	}
-	if shouldEmitRouteDiagnostic(inTag, destination, routingLink.GetTargetDomain()) {
-		emitRouteDiagnostic(
-			"路由决策 inboundTag=%s network=%s dest=%s targetDomain=%s targetIPs=%s outboundTag=%s ruleTag=%s state=%s",
-			emptyRouteValue(inTag),
-			routingLink.GetNetwork().String(),
-			destination.String(),
-			emptyRouteValue(routingLink.GetTargetDomain()),
-			summarizeRouteIPs(routingLink.GetTargetIPs()),
-			emptyRouteValue(handler.Tag()),
-			emptyRouteValue(ruleTag),
-			routeState,
-		)
-	}
 	if accessMessage := log.AccessMessageFromContext(ctx); accessMessage != nil {
 		if tag := handler.Tag(); tag != "" {
 			if inTag == "" {
@@ -591,11 +528,4 @@ func (d *DefaultDispatcher) routedDispatch(ctx context.Context, link *transport.
 	}
 
 	handler.Dispatch(ctx, link)
-}
-
-func emptyRouteValue(value string) string {
-	if value == "" {
-		return "-"
-	}
-	return value
 }

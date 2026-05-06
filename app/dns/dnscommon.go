@@ -5,7 +5,6 @@ import (
 	"encoding/binary"
 	"math"
 	"strings"
-	"sync/atomic"
 	"time"
 
 	"github.com/xtls/xray-core/common"
@@ -19,18 +18,7 @@ import (
 	"golang.org/x/net/dns/dnsmessage"
 )
 
-var DiagnosticLogger func(format string, args ...any)
-
-var dnsAppDiagnosticCount atomic.Uint32
-
 func emitAppDNSDiagnostic(format string, args ...any) {
-	if DiagnosticLogger == nil {
-		return
-	}
-	count := dnsAppDiagnosticCount.Add(1)
-	if count <= 80 || count%100 == 0 {
-		DiagnosticLogger("xray app dns "+format, args...)
-	}
 }
 
 // Fqdn normalizes domain make sure it ends with '.'
