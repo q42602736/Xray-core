@@ -2,7 +2,6 @@ package tun
 
 import (
 	"context"
-	"sync/atomic"
 	"syscall"
 
 	"github.com/xtls/xray-core/common"
@@ -31,7 +30,6 @@ type Handler struct {
 	dispatcher      routing.Dispatcher
 	tag             string
 	sniffingRequest session.SniffingRequest
-	acceptedCount   atomic.Uint32
 }
 
 // ConnectionHandler interface with the only method that stack is going to push new connections to
@@ -73,7 +71,6 @@ func (t *Handler) Init(ctx context.Context, pm policy.Manager, dispatcher routin
 		if t.config.AutoOutboundsInterface == "auto" {
 			t.config.AutoOutboundsInterface = ""
 		}
-		emitDiagnostic("xray tun bind setup name=%s index=%d fixed=%s", tunName, tunIndex, t.config.AutoOutboundsInterface)
 		updater = &InterfaceUpdater{tunIndex: tunIndex, fixedName: t.config.AutoOutboundsInterface}
 		updater.Update()
 		internet.RegisterDialerController(func(network, address string, c syscall.RawConn) error {
@@ -92,15 +89,6 @@ func (t *Handler) Init(ctx context.Context, pm policy.Manager, dispatcher routin
 	}
 
 	errors.LogInfo(t.ctx, tunName, " created")
-	emitDiagnostic(
-		"xray tun created name=%s mtu=%d gateway=%v dns=%v route=%v autoOutboundsInterface=%s",
-		tunName,
-		t.config.MTU,
-		t.config.Gateway,
-		t.config.DNS,
-		t.config.AutoSystemRoutingTable,
-		t.config.AutoOutboundsInterface,
-	)
 
 	tunStackOptions := StackOptions{
 		Tun:         tunInterface,
@@ -130,7 +118,6 @@ func (t *Handler) Init(ctx context.Context, pm policy.Manager, dispatcher routin
 	t.tun = tunInterface
 
 	errors.LogInfo(t.ctx, tunName, " up")
-	emitDiagnostic("xray tun up name=%s", tunName)
 	return nil
 }
 
@@ -145,15 +132,6 @@ func (t *Handler) HandleConnection(conn net.Conn, destination net.Destination) {
 	ctx = c.ContextWithID(ctx, session.NewID())
 
 	source := net.DestinationFromAddr(conn.RemoteAddr())
-	count := t.acceptedCount.Add(1)
-	if count <= 40 || count%100 == 0 {
-		emitDiagnostic(
-			"xray tun inbound accepted count=%d from=%s to=%s",
-			count,
-			source.String(),
-			destination.String(),
-		)
-	}
 	inbound := session.Inbound{
 		Name:          "tun",
 		Tag:           t.tag,

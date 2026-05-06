@@ -6,7 +6,6 @@ import (
 	"io"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/xtls/xray-core/common"
@@ -27,21 +26,7 @@ import (
 	"golang.org/x/net/dns/dnsmessage"
 )
 
-var DiagnosticLogger func(format string, args ...any)
-
-var dnsDiagnosticCount atomic.Uint32
-
-func emitDiagnostic(format string, args ...any) {
-	if DiagnosticLogger != nil {
-		DiagnosticLogger(format, args...)
-	}
-}
-
 func emitDNSDiagnostic(format string, args ...any) {
-	count := dnsDiagnosticCount.Add(1)
-	if count <= 40 || count%100 == 0 {
-		emitDiagnostic("xray dns "+format, args...)
-	}
 }
 
 func init() {
