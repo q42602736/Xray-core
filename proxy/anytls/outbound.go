@@ -124,6 +124,7 @@ func (c *Client) Process(ctx context.Context, link *transport.Link, dialer inter
 	if sess == nil {
 		seq := c.sessionSeq.Add(1)
 		var conn stat.Connection
+		logAnyTLSDiagf("dialing server seq=%d dest=%s", seq, dest)
 		err := retry.ExponentialBackoff(5, 100).On(func() error {
 			rawConn, err := dialer.Dial(ctx, dest)
 			if err != nil {
@@ -133,14 +134,17 @@ func (c *Client) Process(ctx context.Context, link *transport.Link, dialer inter
 			return nil
 		})
 		if err != nil {
+			logAnyTLSDiagf("dial failed seq=%d err=%v", seq, err)
 			return errors.New("anytls: failed to establish connection").AtWarning().Base(err)
 		}
+		logAnyTLSDiagf("server connection established seq=%d", seq)
 
 		var auth [34]byte
 		copy(auth[:32], c.authHash[:])
 		binary.BigEndian.PutUint16(auth[32:34], c.authPadding)
 		if _, err := conn.Write(auth[:]); err != nil {
 			conn.Close()
+			logAnyTLSDiagf("write auth failed seq=%d err=%v", seq, err)
 			return errors.New("anytls: write auth failed").Base(err)
 		}
 		if c.authPadding > 0 {
@@ -150,9 +154,11 @@ func (c *Client) Process(ctx context.Context, link *transport.Link, dialer inter
 			pad.Release()
 			if err != nil {
 				conn.Close()
+				logAnyTLSDiagf("write padding failed seq=%d err=%v", seq, err)
 				return errors.New("anytls: write padding failed").Base(err)
 			}
 		}
+		logAnyTLSDiagf("auth sent seq=%d padding=%d", seq, c.authPadding)
 
 		sess = &session{
 			client:        c,
@@ -162,7 +168,6 @@ func (c *Client) Process(ctx context.Context, link *transport.Link, dialer inter
 			bw:            buf.NewBufferedWriter(buf.NewWriter(conn)),
 			paddingScheme: c.defaultPaddingScheme,
 			streams:       make(map[uint32]*stream),
-			synAckCh:      make(map[uint32]chan error),
 			errCh:         make(chan error, 1),
 			seq:           seq,
 		}
@@ -190,13 +195,8 @@ func (c *Client) Process(ctx context.Context, link *transport.Link, dialer inter
 	stream, err := sess.openStream(ctx, destination, link)
 	if err != nil {
 		sess.close(err)
+		logAnyTLSDiagf("open stream failed target=%s err=%v", destination, err)
 		return errors.New("anytls: failed to open stream").Base(err)
-	}
-	stream.dieHook = func() {
-		if sess.isClosed() || sess.activeStreams.Load() != 0 {
-			return
-		}
-		c.markSessionIdle(sess)
 	}
 	go stream.pumpUplink(sess)
 

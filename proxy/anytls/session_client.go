@@ -2,7 +2,6 @@ package anytls
 
 import (
 	"context"
-	"time"
 
 	M "github.com/sagernet/sing/common/metadata"
 	"github.com/sagernet/sing/common/uot"
@@ -126,26 +125,27 @@ func (s *session) openStream(ctx context.Context, target net.Destination, link *
 	}
 
 	sid := s.nextSID.Add(1) - 1
+	logAnyTLSDiagf(
+		"open stream sid=%d target=%s actual=%s peerVersion=%d",
+		sid,
+		target,
+		actualDest,
+		s.peerVersion,
+	)
 	st := newStream(sid, link)
-	waitForSynAck := sid >= 2 && s.peerVersion >= 2
+	if s.client != nil {
+		st.dieHook = func() {
+			if s.isClosed() || s.activeStreams.Load() != 0 {
+				return
+			}
+			s.client.markSessionIdle(s)
+		}
+	}
 	s.streamsMu.Lock()
 	s.streams[st.sid] = st
 	s.streamsMu.Unlock()
 	s.activeStreams.Add(1)
 	s.inIdlePool.Store(false)
-
-	var ch chan error
-	if waitForSynAck {
-		ch = make(chan error, 1)
-		s.synAckMu.Lock()
-		s.synAckCh[sid] = ch
-		s.synAckMu.Unlock()
-		defer func() {
-			s.synAckMu.Lock()
-			delete(s.synAckCh, sid)
-			s.synAckMu.Unlock()
-		}()
-	}
 
 	var frames buf.MultiBuffer
 	if !s.settingsSent {
@@ -159,6 +159,7 @@ func (s *session) openStream(ctx context.Context, target net.Destination, link *
 	if err := M.SocksaddrSerializer.WriteAddrPort(addrBuf, singbridge.ToSocksaddr(actualDest)); err != nil {
 		addrBuf.Release()
 		s.finishStream(sid, err)
+		logAnyTLSDiagf("write socks addr failed sid=%d err=%v", sid, err)
 		return nil, errors.New("anytls: write socks addr failed").Base(err)
 	}
 	frames = append(frames, newFrame(cmdSYN, sid).toMultiBuffer()...)
@@ -169,28 +170,10 @@ func (s *session) openStream(ctx context.Context, target net.Destination, link *
 	s.writeMu.Unlock()
 	if writeErr != nil {
 		s.finishStream(sid, writeErr)
+		logAnyTLSDiagf("send open packet failed sid=%d err=%v", sid, writeErr)
 		return nil, errors.New("anytls: send session open packet failed").Base(writeErr)
 	}
-
-	if waitForSynAck {
-		select {
-		case serr := <-ch:
-			if serr != nil {
-				s.finishStream(sid, serr)
-				return nil, errors.New("anytls: SYN rejected").Base(serr)
-			}
-		case sessErr := <-s.errCh:
-			s.finishStream(sid, sessErr)
-			return nil, sessErr
-		case <-time.After(3 * time.Second):
-			timeoutErr := errors.New("anytls: SYNACK timeout")
-			s.close(timeoutErr)
-			return nil, timeoutErr
-		case <-ctx.Done():
-			s.finishStream(sid, ctx.Err())
-			return nil, ctx.Err()
-		}
-	}
+	logAnyTLSDiagf("stream open packet sent sid=%d", sid)
 
 	if target.Network == net.Network_UDP {
 		reqBuf := buf.New()
@@ -203,6 +186,7 @@ func (s *session) openStream(ctx context.Context, target net.Destination, link *
 		if err != nil {
 			reqBuf.Release()
 			s.finishStream(sid, err)
+			logAnyTLSDiagf("write UoT request failed sid=%d err=%v", sid, err)
 			return nil, errors.New("anytls: write UoT request failed").Base(err)
 		}
 		UDPPSHframe := (&frame{cmd: cmdPSH, sid: sid}).toMultiBufferWithBody(reqBuf)
@@ -213,6 +197,7 @@ func (s *session) openStream(ctx context.Context, target net.Destination, link *
 
 		if err != nil {
 			s.finishStream(sid, err)
+			logAnyTLSDiagf("send UoT request failed sid=%d err=%v", sid, err)
 			return nil, errors.New("anytls: send UoT request failed").Base(err)
 		}
 	}

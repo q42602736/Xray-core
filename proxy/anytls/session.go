@@ -55,9 +55,6 @@ type session struct {
 	schemeMu      sync.RWMutex
 	paddingScheme *paddingScheme
 
-	synAckMu sync.Mutex
-	synAckCh map[uint32]chan error
-
 	activeStreams atomic.Int32
 	idleSinceNano atomic.Int64
 	inIdlePool    atomic.Bool
@@ -475,23 +472,13 @@ func (s *session) readLoop(ctx context.Context) error {
 				}
 				return errors.New("anytls: unexpected SYNACK from client")
 			}
-			s.synAckMu.Lock()
-			ch := s.synAckCh[sid]
-			s.synAckMu.Unlock()
-			if length == 0 {
-				if ch != nil {
-					ch <- nil
-				}
-			} else {
+			if length > 0 {
 				bodyText, err := readText(s.br, length)
 				if err != nil {
 					return err
 				}
 				errors.LogWarning(ctx, "anytls: stream handshake rejected, streamId=", sid, " err=", bodyText)
 				s.finishStream(sid, errors.New(bodyText))
-				if ch != nil {
-					ch <- errors.New(bodyText)
-				}
 			}
 		case cmdServerSettings:
 			if !s.isClient {
@@ -520,7 +507,9 @@ func (s *session) readLoop(ctx context.Context) error {
 						s.peerVersion = byte(v)
 					}
 				}
+				logAnyTLSDiagf("server settings received peerVersion=%d", s.peerVersion)
 			} else {
+				logAnyTLSDiagf("empty ServerSettings from server")
 				errors.LogWarning(ctx, "anytls: empty ServerSettings from server")
 			}
 		case cmdUpdatePaddingScheme:
@@ -542,8 +531,13 @@ func (s *session) readLoop(ctx context.Context) error {
 					s.schemeMu.Lock()
 					s.paddingScheme = scheme
 					s.schemeMu.Unlock()
+					logAnyTLSDiagf("padding scheme updated")
+				} else if perr != nil {
+					logAnyTLSDiagf("padding scheme update failed err=%v", perr)
+					errors.LogWarning(ctx, "anytls: padding scheme update failed err=", perr)
 				}
 			} else {
+				logAnyTLSDiagf("empty UpdatePaddingScheme from server")
 				errors.LogWarning(ctx, "anytls: empty UpdatePaddingScheme from server")
 			}
 		case cmdAlert:
@@ -566,6 +560,8 @@ func (s *session) readLoop(ctx context.Context) error {
 			if bodyText != "" {
 				alertText += ": " + bodyText
 			}
+			logAnyTLSDiagf("%s", alertText)
+			errors.LogWarning(ctx, alertText)
 			return errors.New(alertText)
 		default:
 			if length > 0 {
